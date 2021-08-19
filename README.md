@@ -10,5 +10,6 @@ python>=3.6 and pytorch>= 1.7:
 `$ git clone https://github.com/xiaol-arch/yolov5_monocular_camera_ranging`<br>
 `$ cd yolov5_monocular_camera_ranging`<br>
 `$ pip install -r requirements.txt`   
-## inference
-`$ python distence.py source 'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream`
+## inference   
+Runing following instruction, you can get a resultant video.<br>
+`$ python testVideo.py`
