@@ -13,3 +13,8 @@ python>=3.6 and pytorch>= 1.7:
 ## inference   
 Runing following instruction, you can get a resultant video.<br>
 `$ python testVideo.py`
+#  to do 
++ Finish real-time ranging programme
++ Fixinaccurate ranging issues in programme
++ Improve the readMe documentation
++ Add speed measurement to the program
