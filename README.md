@@ -13,9 +13,11 @@ python>=3.6 and pytorch>= 1.7:
 `$ pip install -r requirements.txt`   
 ## inference   
 Runing following instruction, you can get a resultant video.<br>
-`$ python testVideo.py`
+This instruction is for video<br>
+`$ python testVideo.py`<br>
+This instruction is for webcam<br>
+`$ python distance.py`
 #  to do 
-+ Finish real-time ranging programme
-+ Fix accurate ranging issues in programme
-+ Improve the readMe documentation
++ Modify issues of accuracy of ranging in program
++ Improve the README documentation
 + Add speed measurement to the program
