@@ -16,6 +16,6 @@ Runing following instruction, you can get a resultant video.<br>
 `$ python testVideo.py`
 #  to do 
 + Finish real-time ranging programme
-+ Fixinaccurate ranging issues in programme
++ Fix accurate ranging issues in programme
 + Improve the readMe documentation
 + Add speed measurement to the program
