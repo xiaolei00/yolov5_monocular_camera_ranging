@@ -14,7 +14,7 @@ python>=3.6 and pytorch>= 1.7:
 ## inference   
 Runing following instruction, you can get a resultant video.<br>
 This instruction is for video<br>
-`$ python testVideo.py`<br>
+`$ python video.py`<br>
 This instruction is for webcam<br>
 `$ python distance.py`<br>
 This intruction is for webcam which can track stuff<br>
