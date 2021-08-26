@@ -8,6 +8,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from utils.augmentations import letterbox
+from utils.downloads import attempt_download
 from utils.general import check_img_size, non_max_suppression, scale_coords, xyxy2xywh
 from utils.plots import plot_one_box
 import random
@@ -16,12 +17,29 @@ from models.experimental import attempt_load
 from estimateDistanceUtil import *
 import ffmpeg
 
+from deep_sort_pytorch.utils.parser import get_config
+from deep_sort_pytorch.deep_sort import DeepSort
+
+
 q = queue.Queue()
+parameter = dict()
 
 # init
 def init():
     FILE = Path(__file__).absolute()
     sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
+
+    deep_sort = 'deep_sort_pytorch/configs/deep_sort.yaml';
+    deep_sort_weights = 'deep_sort_pytorch/deep_sort/deep/checkpoint/ckpt.t7';
+    # initialize deepsort
+    cfg = get_config()
+    cfg.merge_from_file(deep_sort)
+    attempt_download(deep_sort_weights, repo='mikel-brostrom/Yolov5_DeepSort_Pytorch')
+    deepsort = DeepSort(cfg.DEEPSORT.REID_CKPT,
+                        max_dist=cfg.DEEPSORT.MAX_DIST, min_confidence=cfg.DEEPSORT.MIN_CONFIDENCE,
+                        nms_max_overlap=cfg.DEEPSORT.NMS_MAX_OVERLAP, max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+                        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+                        use_cuda=True)
 
     device = torch.device('cuda:0')
     half = device.type != True  # half precision only supported on CUDA
@@ -39,30 +57,33 @@ def init():
 
     img01 = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
     _ = model(img01.half() if half else img01) if device.type != 'cpu' else None  # run once
-    return device, half, model, names, colors
+    return device, half, model, names, colors, deepsort
 
-def receive_dahua():
-    print("start Receive, the webcam is dahua");
-    cap = cv2.VideoCapture("rtsp://192.168.1.22:8554/hl_cam", cv2.CAP_FFMPEG);
-    ret, frame = cap.read();
-    q.put(frame);
-    while ret:
-        ret, frame = cap.read();
-        q.put(frame);
+def receive_video():
+    print("start Receive, the input is video");
+    video_path = 'data/video/testVideo.mp4'
+    cap = cv2.VideoCapture(video_path)
+    assert cap.isOpened(), f'Failed to open {video_path}'
+    # get video information
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    parameter['fps'] = fps
+    parameter['w'] = w
+    parameter['h'] = h
+    ret, frame = cap.read()
+    while (ret):
+        q.put(frame)
+        ret, frame = cap.read()
+    cap.release()
 
 def receive_huilian():
-    print("start Receive, the webcam is huilian");
-    webcam_path = "rtsp://192.168.1.22:8554/hl_cam";
+    print('start Receive, the webcam is huilian');
+    webcam_path = 'rtsp://192.168.1.22:8554/hl_cam';
     probe = ffmpeg.probe(webcam_path)
     video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
     width = int(video_stream['width'])
     height = int(video_stream['height'])
-    r_frame_rate = video_stream['r_frame_rate'];
-    avg_frame_rate = video_stream['avg_frame_rate'];
-    print(f'width-----{width}')
-    print(f'height----{height}')
-    print(f'r_frame_rate----{r_frame_rate}')
-    print(f'avg_frame_rate----{avg_frame_rate}')
     process = (
         ffmpeg
             .input(webcam_path)
@@ -80,12 +101,32 @@ def receive_huilian():
         );
         q.put(in_frame);
 
-def display_video(device, half, model, names, colors):
+def display_video_result(device, half, model, names, colors):
+    print("start displaying");
+    window_name = "video";
+    cv2.namedWindow(window_name, flags=cv2.WINDOW_AUTOSIZE);
+
+    save_path = 'data/video/videoResultTrack.mp4'
+    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), parameter['fps'], (parameter['w'], parameter['h']))
+    while q.empty() != True:
+        frame = q.get();
+        imgs = [frame];
+        img, pred = predict_img(imgs, device, half, model);
+        v1 = draw_img_info(pred, imgs, img, names, colors);
+        cv2.imshow(window_name, v1);
+        cv2.waitKey(1)
+        # transform frame to video
+        vid_writer.write(v1)
+    cv2.destroyAllWindows()
+
+def display_webcam_result(device, half, model, names, colors):
     print("start displaying");
     window_name = "192.168.1.22";
     cv2.namedWindow(window_name, flags = cv2.WINDOW_AUTOSIZE);
 
-    # count = 0
+    save_path = 'data/video/videoResultWebcam.mp4'
+    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), 30,
+                                 (1024, 768))
     while True:
         if q.empty() != True:
             frame = q.get();
@@ -93,8 +134,7 @@ def display_video(device, half, model, names, colors):
             img, pred = predict_img(imgs, device, half, model);
             v1 = draw_img_info(pred, imgs, img, names, colors);
             cv2.imshow(window_name, v1);
-            # cv2.imwrite(f'bbb/{count}.jpg', v1)
-            # count = count+1
+            vid_writer.write(v1);
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break;
 
@@ -123,26 +163,60 @@ def draw_img_info(pred, imgs, img, names, colors):
     for i, det in enumerate(pred):  # detections per image
         s, im0 =  '%g: ' % i, imgs[i].copy()
         s += '%gx%g ' % img.shape[2:]  # print string
-        if len(det):
+        if det is not None and len(det):
             # Rescale boxes from img_size to im0 size
             det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
-            for *xyxy, conf, cls in reversed(det):
-                distance = 0
-                if names[int(cls)] == 'person':
-                    object_width_in_frame = int(xyxy[2]) - int(xyxy[0])
-                    distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_PERSON_WIDTH);
-                elif names[int(cls)] == 'bus':
-                    object_width_in_frame = int(xyxy[2]) - int(xyxy[0]);
-                    distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_BUS_WIDTH);
-                elif names[int(cls)] == 'car':
-                    object_width_in_frame = int(xyxy[2]) - int(xyxy[0]);
-                    distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_CAR_WIDTH);
-                elif names[int(cls)] == 'motorcycle':
-                    object_width_in_frame = int(xyxy[2]) - int(xyxy[0]);
-                    distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_MOTORCYCLE_WIDTH);
-                label = f'{names[int(cls)]} {conf:.2f} {distance:.3f}m'
-                plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
+
+            # 这是deepsort的部分
+            xywhs = xyxy2xywh(det[:, 0:4])
+            confs = det[:, 4]
+            clss = det[:, 5]
+            # pass detections to deepsort
+            outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss, im0)
+
+            # draw boxes for visualization
+            if len(outputs) > 0:
+                for j, (output, conf) in enumerate(zip(outputs, confs)):
+                    distance = 0
+                    bboxes = output[0:4]
+                    id = output[4]
+                    cls = output[5]
+                    c = int(cls)  # integer class
+
+                    if names[c] == 'person':
+                        object_width_in_frame = int(bboxes[2]) - int(bboxes[0])
+                        distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_PERSON_WIDTH);
+                    elif names[c] == 'bus':
+                        object_width_in_frame = int(bboxes[2]) - int(bboxes[0]);
+                        distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_BUS_WIDTH);
+                    elif names[c] == 'car':
+                        object_width_in_frame = int(bboxes[2]) - int(bboxes[0]);
+                        distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_CAR_WIDTH);
+                    elif names[c] == 'motorcycle':
+                        object_width_in_frame = int(bboxes[2]) - int(bboxes[0]);
+                        distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_MOTORCYCLE_WIDTH);
+
+                    index = id - 1
+                    list_distance[index].append(distance)
+                    distance_in_meter = average_finder(list_distance[index], 2)
+                    if initial_distance[index] != 0:
+                        change_in_distance[index] = initial_distance[index] - distance_in_meter
+                        change_in_time[index] = time.time() - initial_time[index]
+                        speed = speed_finder(change_in_distance[index], change_in_time[index])
+                        list_speed[index].append(speed)
+                        average_speed = average_finder(list_speed[index], 10)
+                        if average_speed < 0:
+                            average_speed = average_speed * -1
+                    else:
+                        average_speed = 0
+                    initial_distance[index] = distance_in_meter
+                    initial_time[index] = time.time()
+
+                    label = f'{id} {names[c]} {conf:.2f} {distance:.3f}m {average_speed:.2f}m/s'
+                    color = compute_color_for_id(id)
+                    plot_one_box(bboxes, im0, label=label, color=color, line_thickness=2)
     return im0
+
 
 def ref_img_information(img_path, device, half, model):
     imgs = [cv2.imread(img_path)]
@@ -199,12 +273,30 @@ def get_focal_length(device, half, model):
     focal_length_person = ref_img_information(person_img_path, device, half, model)
     return focal_length_bus, focal_length_car, focal_length_motorcycle, focal_length_person
 
-device, half, model, names, colors = init()
-focal_length_bus, focal_length_car, focal_length_motorcycle, focal_length_person = get_focal_length(device, half, model)
+def compute_color_for_id(label):
+    """
+    Simple function that adds fixed color depending on the id
+    """
+    palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
+
+    color = [int((p * (label ** 2 - label + 1)) % 255) for p in palette]
+    return tuple(color)
+
+# speed parameter init
+initial_time = [0 for i in range(99999)];
+initial_distance = [0 for i in range(99999)];
+change_in_time = [0 for i in range(99999)];
+change_in_distance = [0 for i in range(99999)];
+
+list_distance = [[] for i in range(99999)]
+list_speed = [ [] for i in range(99999)]
+
+device, half, model, names, colors, deepsort = init();
+focal_length_bus, focal_length_car, focal_length_motorcycle, focal_length_person = get_focal_length(device, half, model);
 
 if __name__ == '__main__':
-    p1 = threading.Thread(target = receive_huilian);
-    p2 = threading.Thread(target = display_video, args=(device, half, model, names, colors));
+    p1 = threading.Thread(target=receive_huilian);
+    p2 = threading.Thread(target=display_webcam_result, args=(device, half, model, names, colors));
 
     p1.start();
     p2.start();
