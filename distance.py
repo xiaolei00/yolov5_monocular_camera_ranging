@@ -15,8 +15,11 @@ import numpy as np
 from models.experimental import attempt_load
 from estimateDistanceUtil import *
 import ffmpeg
+import socket
+import struct
 
 q = queue.Queue()
+flag_queue = queue.Queue()
 
 # init
 def init():
@@ -52,7 +55,7 @@ def receive_dahua():
 
 def receive_huilian():
     print("start Receive, the webcam is huilian");
-    webcam_path = "rtsp://192.168.1.22:8554/hl_cam";
+    webcam_path = "rtsp://192.168.2.22:8554/hl_cam";
     probe = ffmpeg.probe(webcam_path)
     video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
     width = int(video_stream['width'])
@@ -82,21 +85,25 @@ def receive_huilian():
 
 def display_video(device, half, model, names, colors):
     print("start displaying");
-    window_name = "192.168.1.22";
+    window_name = "192.168.2.22";
     cv2.namedWindow(window_name, flags = cv2.WINDOW_AUTOSIZE);
-
     # count = 0
     while True:
         if q.empty() != True:
             frame = q.get();
             imgs = [frame];
             img, pred = predict_img(imgs, device, half, model);
-            v1 = draw_img_info(pred, imgs, img, names, colors);
-            cv2.imshow(window_name, v1);
+            im0, flag = draw_img_info(pred, imgs, img, names, colors);
+            cv2.imshow(window_name, im0)
+            cv2.waitKey(1)
+            for data in flag:
+                flag = data
+                if flag == 1:
+                    socket_flag[65] = 0x01
+                else:
+                    socket_flag[65] = 0x00
+                flag_queue.put(socket_flag)
             # cv2.imwrite(f'bbb/{count}.jpg', v1)
-            # count = count+1
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break;
 
 def predict_img(imgs, device, half, model):
     img = [letterbox(x, new_shape=640, auto=True)[0] for x in imgs];
@@ -116,10 +123,11 @@ def predict_img(imgs, device, half, model):
     pred = model(img, augment=False)[0]
 
     # Apply NMS
-    pred = non_max_suppression(pred, 0.4, 0.45, classes=[0, 1, 2, 3, 5, 6, 7], agnostic=False)
+    pred = non_max_suppression(pred, 0.3, 0.45, classes=[0, 1, 2, 3, 5, 6, 7], agnostic=False)
     return img, pred
 
 def draw_img_info(pred, imgs, img, names, colors):
+    flag = []
     for i, det in enumerate(pred):  # detections per image
         s, im0 =  '%g: ' % i, imgs[i].copy()
         s += '%gx%g ' % img.shape[2:]  # print string
@@ -140,9 +148,15 @@ def draw_img_info(pred, imgs, img, names, colors):
                 elif names[int(cls)] == 'motorcycle':
                     object_width_in_frame = int(xyxy[2]) - int(xyxy[0]);
                     distance = distance_finder(focal_length_person, object_width_in_frame, KNOWN_MOTORCYCLE_WIDTH);
+                if distance < 5:
+                    flag.append(1)
+                else:
+                    flag.append(0)
                 label = f'{names[int(cls)]} {conf:.2f} {distance:.3f}m'
-                plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=3)
-    return im0
+                plot_one_box(xyxy, im0, label=label, color=colors[int(cls)], line_thickness=2)
+        else:
+            flag.append(3)
+    return im0, flag
 
 def ref_img_information(img_path, device, half, model):
     imgs = [cv2.imread(img_path)]
@@ -199,12 +213,53 @@ def get_focal_length(device, half, model):
     focal_length_person = ref_img_information(person_img_path, device, half, model)
     return focal_length_bus, focal_length_car, focal_length_motorcycle, focal_length_person
 
+def get_socket_flag():
+    mycheck = 0
+    flag = [0x23, 0x23, 0x23, 0x23, 0x4a, 0x00, 0x00, 0x00, 0x4a, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0xFF, 0xCC, 0x0B, 0x01]
+    for i in range(20, 65):
+        flag.append(0x00)
+    for i in range(65, 74):
+        # 此处是我计算出来的值
+        if i == 65:
+            flag.append(0x01)
+        elif i == 71:
+            for j in range(0, 71):
+                mycheck ^= flag[j]
+            flag.append(mycheck)
+        elif i == 72:
+            flag.append(0xEE)
+        elif i == 73:
+            flag.append(0xDD)
+        else:
+            flag.append(0x00)
+    return flag
+
+def socket_send():
+    time.sleep(2)
+    host = '192.168.1.92'
+    port = 6220
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # 定义socket类型，网络通信，TCP
+    s.connect((host, port))
+    while True:
+        if flag_queue.empty() != True:
+            socket_flag = flag_queue.get();
+            data = struct.pack("%dB" % (len(socket_flag)), *socket_flag)
+            print(data)
+            s.sendall(data)
+            time.sleep(0.05)
+    s.close()  # 关闭连接
+
 device, half, model, names, colors = init()
 focal_length_bus, focal_length_car, focal_length_motorcycle, focal_length_person = get_focal_length(device, half, model)
+socket_flag = get_socket_flag()
 
 if __name__ == '__main__':
+    cond = threading.Condition();
     p1 = threading.Thread(target = receive_huilian);
     p2 = threading.Thread(target = display_video, args=(device, half, model, names, colors));
+    p3 = threading.Thread(target=socket_send);
 
     p1.start();
     p2.start();
+    p3.start();
